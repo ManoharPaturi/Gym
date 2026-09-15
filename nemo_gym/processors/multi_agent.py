@@ -1,7 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Round-robin processing for independently hosted Responses API agents."""
+"""Round-robin processing for independently hosted Responses API agents.
+
+Dataset rows provide initial per-participant Responses API parameters. Processor
+configuration fixes participant routing, turn order, focal participant, and turn
+limit for the run. The Resources Server owns seeded episode state and termination.
+The Processor records exact participant invocations and returns the final focal
+participant response through the standard ``BaseVerifyResponse`` contract.
+"""
 
 from typing import Any, Literal, Optional
 
@@ -54,7 +61,12 @@ class EpisodeStatus(BaseModel):
 
 
 class MultiAgentRunRequest(BaseRunRequest):
-    """Inputs for the focal participant and every independently configured peer."""
+    """Per-task initial inputs for the focal participant and configured peers.
+
+    ``responses_create_params`` initializes the focal participant. The mapping
+    contains only non-focal participants; messages relayed between turns are
+    internal episode state and are recorded in ``participant_trajectories``.
+    """
 
     model_config = ConfigDict(extra="allow")
 
@@ -64,6 +76,8 @@ class MultiAgentRunRequest(BaseRunRequest):
 
 
 class MultiAgentVerifyRequest(BaseVerifyRequest):
+    """Explicit completed episode sent to the Resources Server for scoring."""
+
     model_config = ConfigDict(extra="allow")
 
     focal_participant: str
@@ -74,6 +88,8 @@ class MultiAgentVerifyRequest(BaseVerifyRequest):
 
 
 class MultiAgentVerifyResponse(BaseVerifyResponse):
+    """Standard rollout result plus multi-participant episode artifacts."""
+
     model_config = ConfigDict(extra="allow")
 
     focal_participant: str

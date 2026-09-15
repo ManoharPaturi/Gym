@@ -81,6 +81,19 @@ nemo_sim_processor:
         type: responses_api_models
         name: policy_model
       max_turns: 6
+      protocol_config:
+        max_query_attempts: 3
+        max_assistant_attempts: 1
+        enforce_user_language: true
+        user_language_min_script_compliance: 0.6
+        user_language_min_letters: 8
+        incremental_disclosure_ratio: 0.6
+        persona_grounding_ratio: 1.0
+        context_compression: true
+        compression_window: 1
+        store_reasoning: true
+        random_seed: 42
+        verbosity: 1
       datasets:
       - name: example
         type: example

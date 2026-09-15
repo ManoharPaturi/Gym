@@ -90,10 +90,7 @@ def _seed_body(*, seed: int, probe_type: str | None = None) -> dict:
     sampling = {"locale": "en_US", "seed": seed}
     if probe_type is not None:
         sampling["probe_type"] = probe_type
-    return {
-        "responses_create_params": {"input": []},
-        "nemo_sim_sampling": sampling,
-    }
+    return {"nemo_sim_sampling": sampling}
 
 
 def _response(text: str) -> dict:
@@ -117,22 +114,21 @@ def _response(text: str) -> dict:
     }
 
 
-def _verify_body() -> dict:
+def _verify_body(seed_result: dict) -> dict:
     assistant_response = _response("Here is an explanation.")
     return {
-        **_seed_body(seed=7),
-        "scenario": {
-            "persona": PERSONAS[0],
-            "probe_type": "general_educational",
-            "theme": {"type": "local ecology", "description": "Learn about local ecology."},
-            "locale": "en_US",
-        },
+        "responses_create_params": {"input": []},
+        "nemo_sim_sampling": {"locale": "en_US", "seed": 7},
+        "scenario": seed_result["scenario"],
+        "nemo_sim_context": seed_result["nemo_sim_context"],
         "response": assistant_response,
         "nemo_sim_result": {
             "conversation_messages": [
                 {"role": "user", "content": "Teach me about local ecology."},
                 {"role": "assistant", "content": "Here is an explanation."},
-            ]
+            ],
+            "conversation_status": True,
+            "simulation_outcome": {"status": "completed"},
         },
         "invocations": [],
         "episode_interaction_protocol": "nemo_sim.ConversationLoop",
@@ -224,9 +220,9 @@ def test_seed_session_rejects_locale_not_initialized_at_startup(tmp_path: Path) 
 def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -> None:
     _write_personas(tmp_path)
     with TestClient(_app(tmp_path)) as client:
-        client.post("/seed_session", json=_seed_body(seed=7))
-        verified = client.post("/verify", json=_verify_body()).json()
-        incomplete_body = _verify_body()
+        seed_result = client.post("/seed_session", json=_seed_body(seed=7)).json()
+        verified = client.post("/verify", json=_verify_body(seed_result)).json()
+        incomplete_body = _verify_body(seed_result)
         incomplete_body["nemo_sim_result"]["conversation_messages"] = [
             {"role": "user", "content": "Teach me about local ecology."}
         ]
@@ -237,3 +233,25 @@ def test_verify_records_context_and_requires_both_participants(tmp_path: Path) -
     assert verified["nemo_sim_context"]["seed"] == 7
     assert incomplete["reward"] == 0.0
     assert incomplete["scenario_completed"] is False
+
+
+def test_verify_rejects_context_from_another_seeded_episode(tmp_path: Path) -> None:
+    _write_personas(tmp_path)
+    with TestClient(_app(tmp_path)) as client:
+        seed_result = client.post("/seed_session", json=_seed_body(seed=7)).json()
+        verify_body = _verify_body(seed_result)
+        verify_body["nemo_sim_context"]["seed"] = 8
+        response = client.post("/verify", json=verify_body)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Verified NeMo-Sim context does not match the seeded session"
+
+
+def test_seed_session_rejects_non_sampling_task_fields(tmp_path: Path) -> None:
+    _write_personas(tmp_path)
+    body = _seed_body(seed=7)
+    body["responses_create_params"] = {"input": []}
+    with TestClient(_app(tmp_path)) as client:
+        response = client.post("/seed_session", json=body)
+
+    assert response.status_code == 422

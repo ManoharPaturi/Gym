@@ -40,23 +40,57 @@ Startup fails with that instruction when the pinned source is absent. See
 [`benchmarks/nemo_sim`](../../benchmarks/nemo_sim/) for credential and artifact
 details.
 
-## Episode initialization
+## Episode data contracts
 
-Each Gym row supplies a compact sampling request:
+The episode uses separate contracts for each lifecycle. Static protocol and
+population settings live in YAML. A benchmark dataset row contains only task
+selectors and optional per-alias Responses API overrides:
 
 ```json
 {
+  "responses_create_params": {"input": []},
   "nemo_sim_sampling": {
     "locale": "en_US",
     "seed": 1042,
     "probe_type": "general_open_ended"
-  }
+  },
+  "model_responses_create_params": {}
 }
 ```
 
 `probe_type` is optional. When omitted, the resources server selects it from
 the configured `probe_mix`. The same locale and seed always resolve to the same
 persona, probe, and theme for an unchanged persona dataset and server config.
+
+The Processor sends only `nemo_sim_sampling` to `/seed_session`. The server
+returns both the executable scenario and its immutable selection provenance:
+
+```json
+{
+  "scenario": {
+    "persona": {"first_name": "Morgan"},
+    "probe_type": "general_open_ended",
+    "theme": {"type": "local food", "description": "Seek a practical recommendation."},
+    "goal": "Seek a practical recommendation.",
+    "locale": "en_US",
+    "seed": 1042,
+    "personas_dataset_version": "0.0.2",
+    "personas_source_sha256": "sha256-without-prefix",
+    "personas_panel_seed": 42
+  },
+  "nemo_sim_context": {
+    "locale": "en_US",
+    "seed": 1042,
+    "personas_dataset_version": "0.0.2",
+    "personas_source_sha256": "sha256-without-prefix",
+    "personas_panel_seed": 42,
+    "probe_type": "general_open_ended",
+    "theme": {"topic": "local food", "goal": "Seek a practical recommendation."},
+    "goal": "Seek a practical recommendation.",
+    "persona": {"first_name": "Morgan"}
+  }
+}
+```
 
 At `/seed_session`, the server:
 
@@ -69,8 +103,19 @@ At `/seed_session`, the server:
 
 The Processor gives the scenario to NeMo-Sim's conversation generator, routes
 its participant and support-model calls through Gym, and submits the completed
-trajectory to `/verify`. The verifier includes `nemo_sim_context` for replay
-and auditing.
+episode to `/verify`. The verify request explicitly contains the original
+`responses_create_params`, sampling request, resolved scenario and context,
+focal assistant response, typed NeMo-Sim result, attributed invocations, and
+episode interaction protocol. It does not pass through arbitrary dataset or
+rollout-routing fields.
+
+The Processor returns a `BaseVerifyResponse` extension containing `response`,
+`reward`, `failure_reason`, the resolved scenario/context, `nemo_sim_result`,
+`invocations`, `scenario_completed`, and `episode_interaction_protocol`. The
+rollout collector then adds task/rollout identity and optional observability
+artifacts. The focal `response` is the final `assistant_model` invocation;
+`invocations` preserves every participant and support-model request and
+response.
 
 ## Static and dynamic configuration
 
@@ -84,13 +129,14 @@ The YAML config owns static population and probe policy:
 - `probe_themes`
 - agent, model, and resources-server references
 - turn limits
+- typed `protocol_config` simulation behavior
 
 Each dataset row owns dynamic task identity:
 
 - `nemo_sim_sampling.locale`
 - `nemo_sim_sampling.seed`
 - optional `nemo_sim_sampling.probe_type`
-- default and per-model Responses API parameters
+- focal and optional per-alias Responses API parameters
 
 Changing the dataset version or panel configuration creates a different cache
 path rather than silently overwriting an existing panel.

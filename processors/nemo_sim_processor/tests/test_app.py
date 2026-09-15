@@ -8,15 +8,16 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.server_utils import ServerClient
 from processors.nemo_sim_processor.app import (
     NeMoSimProcessor,
     NeMoSimProcessorConfig,
-    NeMoSimRunRequest,
     _ConversationBridge,
     _GymModelFacade,
 )
+from processors.nemo_sim_processor.contracts import NeMoSimProtocolConfig, NeMoSimRunRequest
 
 
 def _model_response(response_id: str, text: str) -> dict:
@@ -40,7 +41,7 @@ def _model_response(response_id: str, text: str) -> dict:
     }
 
 
-def _processor(*, simulation_config: dict | None = None) -> NeMoSimProcessor:
+def _processor(*, protocol_config: dict | None = None) -> NeMoSimProcessor:
     config = NeMoSimProcessorConfig(
         host="127.0.0.1",
         port=12345,
@@ -53,7 +54,7 @@ def _processor(*, simulation_config: dict | None = None) -> NeMoSimProcessor:
         api_response_model=ModelServerRef(type="responses_api_models", name="api-response-model"),
         resources_server=ResourcesServerRef(type="resources_servers", name="nemo-sim-resources"),
         max_turns=2,
-        simulation_config=simulation_config or {},
+        protocol_config=protocol_config or {},
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"observability_enabled": False}
@@ -65,6 +66,9 @@ def _request() -> NeMoSimRunRequest:
         {
             "responses_create_params": {"input": []},
             "nemo_sim_sampling": {"locale": "en_US", "seed": 1042},
+            "processor_ref": {"type": "processors", "name": "nemo_sim_processor"},
+            "_ng_task_index": 3,
+            "_ng_rollout_index": 1,
         }
     )
 
@@ -74,7 +78,26 @@ def _scenario() -> dict:
         "persona": {"first_name": "Morgan", "age": 42},
         "probe_type": "general_open_ended",
         "theme": {"type": "recommendation", "description": "Plan dinner."},
+        "goal": "Plan dinner.",
         "locale": "en_US",
+        "seed": 1042,
+        "personas_dataset_version": "0.0.2",
+        "personas_source_sha256": "a" * 64,
+        "personas_panel_seed": 42,
+    }
+
+
+def _context() -> dict:
+    return {
+        "locale": "en_US",
+        "seed": 1042,
+        "personas_dataset_version": "0.0.2",
+        "personas_source_sha256": "a" * 64,
+        "personas_panel_seed": 42,
+        "probe_type": "general_open_ended",
+        "theme": {"topic": "recommendation", "goal": "Plan dinner."},
+        "goal": "Plan dinner.",
+        "persona": {"first_name": "Morgan", "age": 42},
     }
 
 
@@ -88,10 +111,10 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
         nonlocal model_call_count
         posts.append(kwargs)
         if kwargs["url_path"] == "/seed_session":
-            payload = {"scenario": _scenario()}
+            payload = {"scenario": _scenario(), "nemo_sim_context": _context()}
             cookies = {"session": "environment"}
         elif kwargs["url_path"] == "/verify":
-            payload = kwargs["json"] | {"reward": 1.0}
+            payload = kwargs["json"] | {"reward": 1.0, "scenario_completed": True}
             cookies = {"session": "environment"}
         else:
             model_call_count += 1
@@ -135,8 +158,19 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
         "nemo-sim-resources",
     ]
     assert posts[1]["json"]["max_output_tokens"] == 77
-    assert posts[0]["json"]["scenario"] is None
+    assert posts[0]["json"] == {"nemo_sim_sampling": {"locale": "en_US", "seed": 1042, "probe_type": None}}
     assert posts[-1]["json"]["scenario"]["persona"]["first_name"] == "Morgan"
+    assert posts[-1]["json"]["nemo_sim_context"] == _context()
+    assert set(posts[-1]["json"]) == {
+        "responses_create_params",
+        "response",
+        "nemo_sim_sampling",
+        "scenario",
+        "nemo_sim_context",
+        "nemo_sim_result",
+        "invocations",
+        "episode_interaction_protocol",
+    }
     assert all(post["cookies"]["session"] == "environment" for post in posts[1:-1])
     assert [(call.alias, call.executor) for call in result.invocations] == [
         ("user_model", "agent"),
@@ -146,11 +180,16 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
     ]
     assert result.response.output[0].content[0].text == "output-3"
     assert result.reward == 1.0
+    assert result.nemo_sim_context.seed == 1042
+    assert result.scenario_completed is True
     assert result.episode_interaction_protocol == "nemo_sim.ConversationLoop"
+    assert isinstance(result, BaseVerifyResponse)
+    assert "processor_ref" not in result.model_dump(mode="json")
+    assert "_ng_task_index" not in result.model_dump(mode="json")
 
 
 def test_rejects_unknown_response_parameter_alias() -> None:
-    with pytest.raises(ValueError, match="unknown aliases"):
+    with pytest.raises(ValueError, match="Input should be"):
         NeMoSimRunRequest.model_validate(
             {
                 **_request().model_dump(mode="json"),
@@ -159,11 +198,14 @@ def test_rejects_unknown_response_parameter_alias() -> None:
         )
 
 
-def test_simulation_config_is_processor_configuration_not_task_input() -> None:
-    processor = _processor(simulation_config={"max_steps": 4, "context_compression": False})
+def test_protocol_config_is_typed_processor_configuration_not_task_input() -> None:
+    processor = _processor(protocol_config={"max_query_attempts": 4, "context_compression": False})
 
-    assert processor.config.simulation_config == {"max_steps": 4, "context_compression": False}
-    with pytest.raises(ValueError, match="must not be set in a dataset row"):
+    assert processor.config.protocol_config == NeMoSimProtocolConfig(
+        max_query_attempts=4,
+        context_compression=False,
+    )
+    with pytest.raises(ValueError, match="owned by another lifecycle"):
         NeMoSimRunRequest.model_validate(
             {
                 **_request().model_dump(mode="json"),
@@ -172,10 +214,21 @@ def test_simulation_config_is_processor_configuration_not_task_input() -> None:
         )
 
 
-@pytest.mark.parametrize("field", ["name", "locale", "max_turns"])
-def test_rejects_gym_managed_simulation_config_fields(field: str) -> None:
-    with pytest.raises(ValueError, match="controlled by NeMoSimProcessor"):
-        _processor(simulation_config={field: "override"})
+@pytest.mark.parametrize("field", ["scenario", "nemo_sim_context", "nemo_sim_result"])
+def test_dataset_row_rejects_output_only_episode_fields(field: str) -> None:
+    with pytest.raises(ValueError, match="owned by another lifecycle"):
+        NeMoSimRunRequest.model_validate(
+            {
+                **_request().model_dump(mode="json"),
+                field: {},
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["name", "locale", "max_turns", "assets_dir", "finance_tier"])
+def test_protocol_config_hides_data_designer_and_unsupported_probe_fields(field: str) -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        _processor(protocol_config={field: "override"})
 
 
 @pytest.mark.asyncio
@@ -184,7 +237,9 @@ async def test_preserves_failure_before_first_assistant_turn(monkeypatch: pytest
 
     async def post(**kwargs):
         payload = (
-            {"scenario": _scenario()} if kwargs["url_path"] == "/seed_session" else kwargs["json"] | {"reward": 0.0}
+            {"scenario": _scenario(), "nemo_sim_context": _context()}
+            if kwargs["url_path"] == "/seed_session"
+            else kwargs["json"] | {"reward": 0.0, "scenario_completed": False}
         )
         response = MagicMock(status=200, ok=True, cookies={"session": "environment"})
         response.content.read = AsyncMock(return_value=b"")
@@ -204,7 +259,7 @@ async def test_preserves_failure_before_first_assistant_turn(monkeypatch: pytest
     monkeypatch.setattr(processor, "_run_nemo_sim", fail_user_gate)
     result = await processor.run(SimpleNamespace(cookies={}), _request())
 
-    assert result.nemo_sim_result["conversation_status"] is False
+    assert result.nemo_sim_result.conversation_status is False
     assert result.response.output == []
     assert result.invocations == []
 

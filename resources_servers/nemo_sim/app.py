@@ -17,18 +17,20 @@ from typing import Any, Optional
 import pyarrow as pa
 import pyarrow.parquet as pq
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    SimpleResourcesServer,
-)
+from nemo_gym.base_resources_server import BaseResourcesServerConfig, SimpleResourcesServer
 from nemo_gym.server_utils import SESSION_ID_KEY
-from processors.nemo_sim_processor.app import (
+from processors.nemo_sim_processor.contracts import (
     NeMoSimProcessorResponse,
+    NeMoSimSamplingRequest,
     NeMoSimScenario,
+    NeMoSimSeedSessionRequest,
+    NeMoSimSeedSessionResponse,
+    NeMoSimSimulationResult,
+    NeMoSimTheme,
     NeMoSimVerifyRequest,
+    ResolvedNeMoSimContext,
 )
 
 
@@ -36,13 +38,6 @@ SUPPORTED_PROBES = frozenset({"general_open_ended", "general_educational"})
 NEMOTRON_PERSONAS_TEAM = "nvidia/nemotron-personas"
 NEMOTRON_PERSONAS_DATASET_PREFIX = "nemotron-personas-dataset-"
 logger = logging.getLogger(__name__)
-
-
-class ProbeTheme(BaseModel):
-    """One deterministic theme and its materialized user objective."""
-
-    topic: str = Field(min_length=1)
-    goal: str = Field(min_length=1)
 
 
 class NeMoSimResourcesServerConfig(BaseResourcesServerConfig):
@@ -57,16 +52,16 @@ class NeMoSimResourcesServerConfig(BaseResourcesServerConfig):
             "general_educational": 0.5,
         }
     )
-    probe_themes: dict[str, list[ProbeTheme]] = Field(
+    probe_themes: dict[str, list[NeMoSimTheme]] = Field(
         default_factory=lambda: {
             "general_open_ended": [
-                ProbeTheme(
+                NeMoSimTheme(
                     topic="local food and dining",
                     goal="Seek a practical recommendation about local food and dining.",
                 )
             ],
             "general_educational": [
-                ProbeTheme(
+                NeMoSimTheme(
                     topic="local ecology",
                     goal="Learn about local ecology by asking focused follow-up questions.",
                 )
@@ -98,50 +93,10 @@ class NeMoSimResourcesServerConfig(BaseResourcesServerConfig):
         return self
 
 
-class NeMoSimSamplingRequest(BaseModel):
-    locale: str = Field("en_US", pattern=r"^[A-Za-z0-9_]+$")
-    seed: int
-    probe_type: Optional[str] = None
-
-    @model_validator(mode="after")
-    def validate_probe_type(self) -> "NeMoSimSamplingRequest":
-        if self.probe_type is not None and self.probe_type not in SUPPORTED_PROBES:
-            raise ValueError(f"Unsupported probe type: {self.probe_type!r}")
-        return self
-
-
-class NeMoSimSeedSessionRequest(BaseSeedSessionRequest):
-    model_config = ConfigDict(extra="allow")
-
-    nemo_sim_sampling: NeMoSimSamplingRequest
-
-
-class ResolvedNeMoSimContext(BaseModel):
-    locale: str
-    seed: int
-    personas_dataset_version: str
-    personas_source_sha256: str
-    personas_panel_seed: int
-    probe_type: str
-    theme: ProbeTheme
-    goal: str
-    persona: dict[str, Any]
-
-
-class NeMoSimSeedSessionResponse(BaseModel):
-    scenario: NeMoSimScenario
-    nemo_sim_context: ResolvedNeMoSimContext
-
-
 class NeMoSimEpisodeStatusResponse(BaseModel):
     terminated: bool = False
     reason: Optional[str] = None
     state: dict[str, Any]
-
-
-class NeMoSimVerifyResponse(NeMoSimProcessorResponse):
-    nemo_sim_context: ResolvedNeMoSimContext
-    scenario_completed: bool
 
 
 class PreparedPersonaDataset(BaseModel):
@@ -206,8 +161,8 @@ def _persona_from_row(row: dict[str, Any]) -> Optional[dict[str, Any]]:
     return row or None
 
 
-def _conversation_roles(result: dict[str, Any]) -> set[str]:
-    messages = result.get("conversation_messages")
+def _conversation_roles(result: NeMoSimSimulationResult) -> set[str]:
+    messages = result.conversation_messages
     if isinstance(messages, str):
         try:
             messages = json.loads(messages)
@@ -401,6 +356,8 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
 
     def _select_probe(self, sampling: NeMoSimSamplingRequest) -> str:
         if sampling.probe_type is not None:
+            if sampling.probe_type not in SUPPORTED_PROBES:
+                raise HTTPException(status_code=422, detail=f"Unsupported probe type: {sampling.probe_type!r}")
             return sampling.probe_type
         threshold = _stable_fraction(sampling.seed, sampling.locale, "probe")
         total = sum(self.config.probe_mix.values())
@@ -482,13 +439,14 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
         self,
         request: Request,
         body: NeMoSimVerifyRequest,
-    ) -> NeMoSimVerifyResponse:
+    ) -> NeMoSimProcessorResponse:
         context = self._context(request)
+        if body.nemo_sim_context != context:
+            raise HTTPException(status_code=409, detail="Verified NeMo-Sim context does not match the seeded session")
         scenario_completed = {"user", "assistant"} <= _conversation_roles(body.nemo_sim_result)
-        return NeMoSimVerifyResponse(
+        return NeMoSimProcessorResponse(
             **body.model_dump(mode="json"),
             reward=float(scenario_completed),
-            nemo_sim_context=context,
             scenario_completed=scenario_completed,
         )
 

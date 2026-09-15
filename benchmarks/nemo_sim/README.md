@@ -33,10 +33,13 @@ It also materializes `benchmarks/nemo_sim/data/nemo_sim.jsonl`, the lightweight
 Gym task dataset. At Resources Server startup, the source is validated and a
 bounded deterministic panel is created or reused beside it under `panels/`.
 
-NeMo-Sim protocol settings are benchmark-wide `NeMoSimProcessorConfig.simulation_config`
-values, not task-row fields. The Processor always controls `name` and `max_turns`,
-while `/seed_session` supplies each scenario's `locale`. Dataset rows contain only
-the per-task sampling inputs.
+NeMo-Sim behavior is pinned once in the benchmark's typed
+`NeMoSimProcessorConfig.protocol_config`; it is not repeated in task rows. The
+Processor separately owns `max_turns`, fixes the Data Designer output-column
+name internally, and supplies each scenario's locale after `/seed_session`.
+Dataset rows contain only per-task sampling inputs and optional model-call
+parameter overrides. Resolved scenarios are output-only and cannot be supplied
+by a dataset row.
 
 After preparation:
 
