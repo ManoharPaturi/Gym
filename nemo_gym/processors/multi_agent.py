@@ -6,7 +6,7 @@
 Dataset rows provide initial per-participant Responses API parameters. Processor
 configuration fixes participant routing, turn order, focal participant, and turn
 limit for the run. The Resources Server owns seeded episode state and termination.
-The Processor records exact participant invocations and returns the final focal
+The Processor records exact participant turns and returns the final focal
 participant response through the standard ``BaseVerifyResponse`` contract.
 """
 
@@ -38,7 +38,7 @@ EpisodeEventKind = Literal["response_item", "state", "termination"]
 
 
 class ParticipantTurn(BaseModel):
-    """One attributed agent invocation, including its exact model-visible input."""
+    """One attributed participant turn, including its exact model-visible input."""
 
     turn_index: int
     participant: str
@@ -67,8 +67,8 @@ class EpisodeStatus(BaseModel):
     state: dict[str, Any] = Field(default_factory=dict)
 
 
-class ResponsesInvocationResult(BaseModel):
-    """Validated result of one Responses API actor invocation."""
+class ResponsesCallResult(BaseModel):
+    """Validated result of one Responses API call."""
 
     response: NeMoGymResponse
     agent_trajectory: Optional[dict[str, Any]] = None
@@ -151,14 +151,14 @@ class BaseMultiTurnProcessor(BaseProcessor):
         await raise_for_status(response)
         return await get_response_json(response), dict(response.cookies)
 
-    async def _invoke_responses_actor(
+    async def _call_responses_actor(
         self,
         *,
         target: AgentServerRef | ModelServerRef,
         params: NeMoGymResponseCreateParamsNonStreaming,
         body: BaseRunRequest,
         cookies: Mapping[str, Any],
-    ) -> ResponsesInvocationResult:
+    ) -> ResponsesCallResult:
         response = await self.server_client.post(
             server_name=target.name,
             url_path=self.url_path_for_run("/v1/responses", body),
@@ -168,7 +168,7 @@ class BaseMultiTurnProcessor(BaseProcessor):
         await raise_for_status(response)
         response_json = await get_response_json(response)
         agent_trajectory = response_json.pop(INTERNAL_TRAJECTORY_KEY, None)
-        return ResponsesInvocationResult(
+        return ResponsesCallResult(
             response=NeMoGymResponse.model_validate(response_json),
             agent_trajectory=agent_trajectory,
             response_cookies=dict(response.cookies),
@@ -300,7 +300,7 @@ class MultiAgentProcessor(BaseMultiTurnProcessor):
         cookies: Any,
     ) -> tuple[NeMoGymResponse, Optional[dict[str, Any]], dict[str, Any]]:
         spec = self._episode_spec()
-        result = await self._invoke_responses_actor(
+        result = await self._call_responses_actor(
             target=spec.participants[participant],
             params=params,
             body=body,

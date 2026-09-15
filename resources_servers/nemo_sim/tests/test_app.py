@@ -130,7 +130,7 @@ def _verify_body(seed_result: dict) -> dict:
             "conversation_status": True,
             "simulation_outcome": {"status": "completed"},
         },
-        "invocations": [],
+        "turns": [],
         "episode_interaction_protocol": "nemo_sim.ConversationLoop",
     }
 

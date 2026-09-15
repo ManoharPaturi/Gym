@@ -22,11 +22,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.processors.multi_agent import BaseMultiTurnProcessor, BaseMultiTurnProcessorConfig
+from nemo_gym.processors.multi_agent import (
+    BaseMultiTurnProcessor,
+    BaseMultiTurnProcessorConfig,
+    ParticipantTurn,
+)
 from processors.nemo_sim_processor.contracts import (
     EPISODE_INTERACTION_PROTOCOL,
     NEMO_SIM_MODEL_ALIASES,
-    NeMoSimInvocation,
     NeMoSimProcessorResponse,
     NeMoSimProtocolConfig,
     NeMoSimRunRequest,
@@ -103,7 +106,7 @@ class _GeneratorHarness:
 
 
 class _ConversationBridge:
-    """Bridge blocking NeMo-Sim calls to async Gym Agent invocations."""
+    """Bridge blocking NeMo-Sim calls to async Gym Agent turns and support-model calls."""
 
     def __init__(
         self,
@@ -117,7 +120,7 @@ class _ConversationBridge:
         self.body = body
         self.event_loop = event_loop
         self.cookies_by_alias = {alias: dict(cookies) for alias in NEMO_SIM_MODEL_ALIASES}
-        self.invocations: list[NeMoSimInvocation] = []
+        self.turns: list[ParticipantTurn] = []
         self.responses_by_alias: dict[str, list[NeMoGymResponse]] = {alias: [] for alias in NEMO_SIM_MODEL_ALIASES}
 
     def complete_from_worker(
@@ -162,7 +165,7 @@ class _ConversationBridge:
         request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(request_values)
 
         target = self.processor.config.target_for_alias(alias)
-        result = await self.processor._invoke_responses_actor(
+        result = await self.processor._call_responses_actor(
             target=target,
             params=request_params,
             body=self.body,
@@ -171,16 +174,16 @@ class _ConversationBridge:
         gym_response = result.response
         self.cookies_by_alias[alias].update(result.response_cookies)
         self.responses_by_alias[alias].append(gym_response)
-        self.invocations.append(
-            NeMoSimInvocation(
-                alias=alias,
-                executor="agent" if isinstance(target, AgentServerRef) else "model",
-                call_index=len(self.responses_by_alias[alias]) - 1,
-                request=request_params,
-                response=gym_response,
-                ng_trajectory=result.agent_trajectory,
+        if alias in {"user_model", "assistant_model"}:
+            self.turns.append(
+                ParticipantTurn(
+                    turn_index=len(self.turns),
+                    participant="user" if alias == "user_model" else "assistant",
+                    request=request_params,
+                    response=gym_response,
+                    agent_trajectory=result.agent_trajectory,
+                )
             )
-        )
 
         tool_calls = [
             {
@@ -303,7 +306,7 @@ class NeMoSimProcessor(BaseMultiTurnProcessor):
             scenario=episode.scenario,
             nemo_sim_context=episode.context,
             nemo_sim_result=nemo_sim_result,
-            invocations=bridge.invocations,
+            turns=bridge.turns,
             episode_interaction_protocol=EPISODE_INTERACTION_PROTOCOL,
         )
         result = await self._verify_episode(

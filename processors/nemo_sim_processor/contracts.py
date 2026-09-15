@@ -26,7 +26,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.processors.multi_agent import ParticipantTurn
 
 
 NeMoSimModelAlias = Literal[
@@ -151,25 +152,12 @@ class NeMoSimSeedSessionRequest(BaseSeedSessionRequest):
 
 
 class NeMoSimSeedSessionResponse(BaseSeedSessionResponse):
-    """Resolved state returned exactly once before participant invocations."""
+    """Resolved state returned exactly once before participant turns."""
 
     model_config = ConfigDict(extra="forbid")
 
     scenario: NeMoSimScenario
     nemo_sim_context: ResolvedNeMoSimContext
-
-
-class NeMoSimInvocation(BaseModel):
-    """One attributed participant or support-model invocation."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    alias: NeMoSimModelAlias
-    executor: Literal["agent", "model"]
-    call_index: int = Field(ge=0)
-    request: NeMoGymResponseCreateParamsNonStreaming
-    response: NeMoGymResponse
-    ng_trajectory: dict[str, Any] | None = None
 
 
 class NeMoSimSimulationResult(BaseModel):
@@ -218,7 +206,7 @@ class NeMoSimVerifyRequest(BaseVerifyRequest):
     scenario: NeMoSimScenario
     nemo_sim_context: ResolvedNeMoSimContext
     nemo_sim_result: NeMoSimSimulationResult
-    invocations: list[NeMoSimInvocation]
+    turns: list[ParticipantTurn]
     episode_interaction_protocol: Literal["nemo_sim.ConversationLoop"] = EPISODE_INTERACTION_PROTOCOL
 
 
@@ -231,6 +219,6 @@ class NeMoSimProcessorResponse(BaseVerifyResponse):
     scenario: NeMoSimScenario
     nemo_sim_context: ResolvedNeMoSimContext
     nemo_sim_result: NeMoSimSimulationResult
-    invocations: list[NeMoSimInvocation]
+    turns: list[ParticipantTurn]
     episode_interaction_protocol: Literal["nemo_sim.ConversationLoop"] = EPISODE_INTERACTION_PROTOCOL
     scenario_completed: bool

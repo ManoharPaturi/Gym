@@ -100,7 +100,7 @@ The Processor gives the scenario to NeMo-Sim's conversation generator, routes
 its participant and support-model calls through Gym, and submits the completed
 episode to `/verify`. The verify request explicitly contains the original
 `responses_create_params`, sampling request, resolved scenario and context,
-focal assistant response, typed NeMo-Sim result, attributed invocations, and
+focal assistant response, typed NeMo-Sim result, ordered participant turns, and
 episode interaction protocol. It does not pass through arbitrary dataset or
 rollout-routing fields.
 
@@ -113,11 +113,13 @@ episode interaction protocol: fixed round-robin sequencing for
 
 The Processor returns a `BaseVerifyResponse` extension containing `response`,
 `reward`, `failure_reason`, the resolved scenario/context, `nemo_sim_result`,
-`invocations`, `scenario_completed`, and `episode_interaction_protocol`. The
+`turns`, `scenario_completed`, and `episode_interaction_protocol`. The
 rollout collector then adds task/rollout identity and optional observability
-artifacts. The focal `response` is the final `assistant_model` invocation;
-`invocations` preserves every participant and support-model request and
-response.
+artifacts. The focal `response` is the final Assistant Agent turn;
+`turns` preserves each User Agent and Assistant Agent request, response, and
+optional Agent trajectory in episode order. Judge, summary, and API-response
+model calls remain protocol internals represented by Gym observability rather
+than the semantic episode contract.
 
 ## Static and dynamic configuration
 

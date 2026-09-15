@@ -116,6 +116,10 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
         else:
             model_call_count += 1
             payload = _model_response(f"response-{model_call_count}", f"output-{model_call_count}")
+            if kwargs["server_name"] in {"user-agent", "assistant-agent"}:
+                payload["_ng_trajectory"] = {
+                    "alias": "user_model" if kwargs["server_name"] == "user-agent" else "assistant_model"
+                }
             cookies = {}
         response = MagicMock(status=200, ok=True, cookies=cookies)
         response.content.read = AsyncMock(return_value=b"")
@@ -165,16 +169,16 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
         "scenario",
         "nemo_sim_context",
         "nemo_sim_result",
-        "invocations",
+        "turns",
         "episode_interaction_protocol",
     }
     assert all(post["cookies"]["session"] == "environment" for post in posts[1:-1])
-    assert [(call.alias, call.executor) for call in result.invocations] == [
-        ("user_model", "agent"),
-        ("judge_model", "model"),
-        ("assistant_model", "agent"),
-        ("summary_model", "model"),
+    assert [(turn.turn_index, turn.participant) for turn in result.turns] == [
+        (0, "user"),
+        (1, "assistant"),
     ]
+    assert result.turns[0].agent_trajectory == {"alias": "user_model"}
+    assert result.turns[1].agent_trajectory == {"alias": "assistant_model"}
     assert result.response.output[0].content[0].text == "output-3"
     assert result.reward == 1.0
     assert result.nemo_sim_context.seed == 1042
@@ -260,7 +264,7 @@ async def test_preserves_failure_before_first_assistant_turn(monkeypatch: pytest
     assert result.nemo_sim_result.conversation_messages == []
     assert result.nemo_sim_result.simulation_outcome == {"status": "failed"}
     assert result.response.output == []
-    assert result.invocations == []
+    assert result.turns == []
 
 
 @pytest.mark.asyncio
