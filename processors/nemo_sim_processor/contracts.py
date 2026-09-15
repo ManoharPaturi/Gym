@@ -14,9 +14,10 @@ The contracts separate five lifetimes:
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseRunRequest,
@@ -85,24 +86,29 @@ class NeMoSimTheme(BaseModel):
     goal: str = Field(min_length=1)
 
 
+class NeMoSimScenarioTheme(BaseModel):
+    """Theme representation consumed by supported NeMo-Sim probes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+
+
 class NeMoSimScenario(BaseModel):
-    """Resolved, replayable row passed to NeMo-Sim's conversation generator."""
+    """Executable row passed to NeMo-Sim's conversation generator."""
 
     model_config = ConfigDict(extra="allow")
 
     persona: dict[str, Any]
     probe_type: str
-    theme: dict[str, Any] | str
+    theme: NeMoSimScenarioTheme | str
     goal: str
     locale: str
-    seed: int
-    personas_dataset_version: str
-    personas_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    personas_panel_seed: int
 
 
 class ResolvedNeMoSimContext(BaseModel):
-    """Immutable provenance for the Resources Server's scenario selection."""
+    """Immutable provenance for scenario selection, without scenario duplication."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -111,10 +117,6 @@ class ResolvedNeMoSimContext(BaseModel):
     personas_dataset_version: str
     personas_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     personas_panel_seed: int
-    probe_type: str
-    theme: NeMoSimTheme
-    goal: str
-    persona: dict[str, Any]
 
 
 class NeMoSimRunRequest(BaseRunRequest):
@@ -171,15 +173,20 @@ class NeMoSimInvocation(BaseModel):
 
 
 class NeMoSimSimulationResult(BaseModel):
-    """Stable NeMo-Sim episode outputs plus probe-specific extensions."""
+    """Structured Gym episode outputs plus probe-specific extensions.
+
+    NeMo-Sim emits several Data Designer columns as JSON strings. The adapter
+    decodes those strings here so Gym rollout consumers receive one stable
+    structured contract.
+    """
 
     model_config = ConfigDict(extra="allow")
 
-    conversation_messages: str | list[dict[str, Any]]
+    conversation_messages: list[dict[str, Any]]
     conversation_status: bool
-    simulation_outcome: str | dict[str, Any]
-    conversation_metadata: str | dict[str, Any] | None = None
-    simulation_traces: str | list[dict[str, Any]] | None = None
+    simulation_outcome: dict[str, Any]
+    conversation_metadata: dict[str, Any] | None = None
+    simulation_traces: list[dict[str, Any]] | None = None
     trajectory_id: str | None = None
     persona_uuid: str | None = None
     probe_family: str | None = None
@@ -187,6 +194,19 @@ class NeMoSimSimulationResult(BaseModel):
     num_turns: int | None = Field(None, ge=0)
     num_tool_calls: int | None = Field(None, ge=0)
     user_query: str | None = None
+
+    @field_validator(
+        "conversation_messages",
+        "simulation_outcome",
+        "conversation_metadata",
+        "simulation_traces",
+        mode="before",
+    )
+    @classmethod
+    def decode_data_designer_json_columns(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return json.loads(value)
+        return value
 
 
 class NeMoSimVerifyRequest(BaseVerifyRequest):

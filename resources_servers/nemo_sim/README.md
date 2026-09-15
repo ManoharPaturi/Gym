@@ -72,25 +72,20 @@ returns both the executable scenario and its immutable selection provenance:
     "probe_type": "general_open_ended",
     "theme": {"type": "local food", "description": "Seek a practical recommendation."},
     "goal": "Seek a practical recommendation.",
-    "locale": "en_US",
-    "seed": 1042,
-    "personas_dataset_version": "0.0.2",
-    "personas_source_sha256": "sha256-without-prefix",
-    "personas_panel_seed": 42
+    "locale": "en_US"
   },
   "nemo_sim_context": {
     "locale": "en_US",
     "seed": 1042,
     "personas_dataset_version": "0.0.2",
     "personas_source_sha256": "sha256-without-prefix",
-    "personas_panel_seed": 42,
-    "probe_type": "general_open_ended",
-    "theme": {"topic": "local food", "goal": "Seek a practical recommendation."},
-    "goal": "Seek a practical recommendation.",
-    "persona": {"first_name": "Morgan"}
+    "personas_panel_seed": 42
   }
 }
 ```
+
+Scenario content and selection provenance are intentionally separate. The
+context does not duplicate the selected persona, probe, theme, or goal.
 
 At `/seed_session`, the server:
 
@@ -108,6 +103,13 @@ episode to `/verify`. The verify request explicitly contains the original
 focal assistant response, typed NeMo-Sim result, attributed invocations, and
 episode interaction protocol. It does not pass through arbitrary dataset or
 rollout-routing fields.
+
+`NeMoSimProcessor` and the round-robin `MultiAgentProcessor` both inherit
+`BaseMultiTurnProcessor`. The base owns Resources Server seed/verify dispatch,
+Responses API actor calls, cookie propagation, response validation, Agent
+trajectory extraction, and aggregate-metrics routing. Each subclass owns its
+episode interaction protocol: fixed round-robin sequencing for
+`MultiAgentProcessor`, and NeMo-Sim `ConversationLoop` for `NeMoSimProcessor`.
 
 The Processor returns a `BaseVerifyResponse` extension containing `response`,
 `reward`, `failure_reason`, the resolved scenario/context, `nemo_sim_result`,

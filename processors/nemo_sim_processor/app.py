@@ -15,16 +15,14 @@ from typing import Any, Literal
 from fastapi import Body, Request
 from pydantic import Field
 
-from nemo_gym.agents.responses_api_agent import INTERNAL_TRAJECTORY_KEY
-from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef, ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.processors.base import BaseProcessor, BaseProcessorConfig
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.processors.multi_agent import BaseMultiTurnProcessor, BaseMultiTurnProcessorConfig
 from processors.nemo_sim_processor.contracts import (
     EPISODE_INTERACTION_PROTOCOL,
     NEMO_SIM_MODEL_ALIASES,
@@ -50,7 +48,7 @@ class _ResolvedNeMoSimEpisode:
     context: ResolvedNeMoSimContext
 
 
-class NeMoSimProcessorConfig(BaseProcessorConfig):
+class NeMoSimProcessorConfig(BaseMultiTurnProcessorConfig):
     """Configure participant Agents separately from support Model Servers."""
 
     user_agent: AgentServerRef
@@ -58,7 +56,6 @@ class NeMoSimProcessorConfig(BaseProcessorConfig):
     judge_model: ModelServerRef
     summary_model: ModelServerRef
     api_response_model: ModelServerRef
-    resources_server: ResourcesServerRef
     max_turns: int = Field(5, ge=1)
     agent_call_timeout_s: float = Field(300.0, gt=0)
     protocol_config: NeMoSimProtocolConfig = Field(default_factory=NeMoSimProtocolConfig)
@@ -163,20 +160,16 @@ class _ConversationBridge:
         if max_tokens is not None:
             request_values["max_output_tokens"] = max_tokens
         request_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(request_values)
-        request_json = request_params.model_dump(mode="json", exclude_none=True)
 
         target = self.processor.config.target_for_alias(alias)
-        response = await self.processor.server_client.post(
-            server_name=target.name,
-            url_path=self.processor.url_path_for_run("/v1/responses", self.body),
-            json=request_json,
+        result = await self.processor._invoke_responses_actor(
+            target=target,
+            params=request_params,
+            body=self.body,
             cookies=self.cookies_by_alias[alias],
         )
-        await raise_for_status(response)
-        response_json = await get_response_json(response)
-        agent_trajectory = response_json.pop(INTERNAL_TRAJECTORY_KEY, None)
-        gym_response = NeMoGymResponse.model_validate(response_json)
-        self.cookies_by_alias[alias].update(dict(response.cookies))
+        gym_response = result.response
+        self.cookies_by_alias[alias].update(result.response_cookies)
         self.responses_by_alias[alias].append(gym_response)
         self.invocations.append(
             NeMoSimInvocation(
@@ -185,7 +178,7 @@ class _ConversationBridge:
                 call_index=len(self.responses_by_alias[alias]) - 1,
                 request=request_params,
                 response=gym_response,
-                ng_trajectory=agent_trajectory,
+                ng_trajectory=result.agent_trajectory,
             )
         )
 
@@ -250,7 +243,7 @@ def _response_text(response: NeMoGymResponse) -> str:
     return "\n".join(chunks)
 
 
-class NeMoSimProcessor(BaseProcessor):
+class NeMoSimProcessor(BaseMultiTurnProcessor):
     """Let NeMo-Sim orchestrate participant Agents and support Model Servers."""
 
     config: NeMoSimProcessorConfig
@@ -281,20 +274,16 @@ class NeMoSimProcessor(BaseProcessor):
         body: NeMoSimRunRequest = Body(),
     ) -> NeMoSimProcessorResponse:
         seed_request = NeMoSimSeedSessionRequest(nemo_sim_sampling=body.nemo_sim_sampling)
-        seed_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/seed_session",
-            json=seed_request.model_dump(mode="json"),
+        seed_json, environment_cookies = await self._seed_episode(
+            payload=seed_request,
             cookies=dict(request.cookies),
         )
-        await raise_for_status(seed_response)
-        seed_result = NeMoSimSeedSessionResponse.model_validate(await get_response_json(seed_response))
+        seed_result = NeMoSimSeedSessionResponse.model_validate(seed_json)
         episode = _ResolvedNeMoSimEpisode(
             task=body,
             scenario=seed_result.scenario,
             context=seed_result.nemo_sim_context,
         )
-        environment_cookies = dict(seed_response.cookies)
         bridge = _ConversationBridge(
             processor=self,
             body=episode.task,
@@ -317,14 +306,11 @@ class NeMoSimProcessor(BaseProcessor):
             invocations=bridge.invocations,
             episode_interaction_protocol=EPISODE_INTERACTION_PROTOCOL,
         )
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request.model_dump(mode="json"),
+        result = await self._verify_episode(
+            payload=verify_request,
             cookies=environment_cookies,
         )
-        await raise_for_status(verify_response)
-        return NeMoSimProcessorResponse.model_validate(await get_response_json(verify_response))
+        return NeMoSimProcessorResponse.model_validate(result)
 
 
 def _empty_assistant_response(config: NeMoSimProcessorConfig) -> NeMoGymResponse:

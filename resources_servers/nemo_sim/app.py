@@ -163,13 +163,6 @@ def _persona_from_row(row: dict[str, Any]) -> Optional[dict[str, Any]]:
 
 def _conversation_roles(result: NeMoSimSimulationResult) -> set[str]:
     messages = result.conversation_messages
-    if isinstance(messages, str):
-        try:
-            messages = json.loads(messages)
-        except json.JSONDecodeError:
-            return set()
-    if not isinstance(messages, list):
-        return set()
     return {
         role for message in messages if isinstance(message, dict) and isinstance((role := message.get("role")), str)
     }
@@ -179,7 +172,7 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
     """Resolve one replayable persona and general-purpose probe per episode."""
 
     config: NeMoSimResourcesServerConfig
-    session_id_to_context: dict[str, ResolvedNeMoSimContext] = Field(default_factory=dict)
+    session_id_to_seed: dict[str, NeMoSimSeedSessionResponse] = Field(default_factory=dict)
     locale_to_personas: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     locale_to_dataset: dict[str, PreparedPersonaDataset] = Field(default_factory=dict)
 
@@ -368,70 +361,59 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
                 return probe
         return next(reversed(self.config.probe_mix))
 
-    def _resolve_context(self, sampling: NeMoSimSamplingRequest) -> ResolvedNeMoSimContext:
+    def _resolve_seed(self, sampling: NeMoSimSamplingRequest) -> NeMoSimSeedSessionResponse:
         personas = self._load_personas(sampling.locale)
         dataset = self.locale_to_dataset[sampling.locale]
         persona = personas[_stable_index(len(personas), sampling.seed, sampling.locale, "persona")]
         probe_type = self._select_probe(sampling)
         themes = self.config.probe_themes[probe_type]
         theme = themes[_stable_index(len(themes), sampling.seed, sampling.locale, probe_type, "theme")]
-        return ResolvedNeMoSimContext(
-            locale=sampling.locale,
-            seed=sampling.seed,
-            personas_dataset_version=dataset.version,
-            personas_source_sha256=dataset.source_sha256,
-            personas_panel_seed=dataset.panel_seed,
-            probe_type=probe_type,
-            theme=theme,
-            goal=theme.goal,
-            persona=persona,
+        return NeMoSimSeedSessionResponse(
+            scenario=NeMoSimScenario(
+                locale=sampling.locale,
+                persona=persona,
+                probe_type=probe_type,
+                theme={
+                    "type": theme.topic,
+                    "description": theme.goal,
+                },
+                goal=theme.goal,
+            ),
+            nemo_sim_context=ResolvedNeMoSimContext(
+                locale=sampling.locale,
+                seed=sampling.seed,
+                personas_dataset_version=dataset.version,
+                personas_source_sha256=dataset.source_sha256,
+                personas_panel_seed=dataset.panel_seed,
+            ),
         )
 
-    def _context(self, request: Request) -> ResolvedNeMoSimContext:
+    def _seeded_episode(self, request: Request) -> NeMoSimSeedSessionResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self.session_id_to_context:
+        if session_id not in self.session_id_to_seed:
             raise RuntimeError("No active NeMo-Sim scenario. Call /seed_session first.")
-        return self.session_id_to_context[session_id]
+        return self.session_id_to_seed[session_id]
 
     async def seed_session(
         self,
         request: Request,
         body: NeMoSimSeedSessionRequest,
     ) -> NeMoSimSeedSessionResponse:
-        context = await asyncio.to_thread(self._resolve_context, body.nemo_sim_sampling)
-        self.session_id_to_context[request.session[SESSION_ID_KEY]] = context
-        scenario = NeMoSimScenario.model_validate(
-            {
-                "locale": context.locale,
-                "persona": context.persona,
-                "probe_type": context.probe_type,
-                "theme": {
-                    "type": context.theme.topic,
-                    "description": context.theme.goal,
-                },
-                "goal": context.goal,
-                "personas_dataset_version": context.personas_dataset_version,
-                "personas_source_sha256": context.personas_source_sha256,
-                "personas_panel_seed": context.personas_panel_seed,
-                "seed": context.seed,
-            }
-        )
-        return NeMoSimSeedSessionResponse(
-            scenario=scenario,
-            nemo_sim_context=context,
-        )
+        result = await asyncio.to_thread(self._resolve_seed, body.nemo_sim_sampling)
+        self.session_id_to_seed[request.session[SESSION_ID_KEY]] = result
+        return result
 
     async def episode_status(self, request: Request) -> NeMoSimEpisodeStatusResponse:
-        context = self._context(request)
+        seeded = self._seeded_episode(request)
         return NeMoSimEpisodeStatusResponse(
             state={
-                "locale": context.locale,
-                "seed": context.seed,
-                "personas_dataset_version": context.personas_dataset_version,
-                "personas_source_sha256": context.personas_source_sha256,
-                "personas_panel_seed": context.personas_panel_seed,
-                "probe_type": context.probe_type,
-                "theme": context.theme.model_dump(mode="json"),
+                **seeded.nemo_sim_context.model_dump(mode="json"),
+                "probe_type": seeded.scenario.probe_type,
+                "theme": (
+                    seeded.scenario.theme.model_dump(mode="json")
+                    if isinstance(seeded.scenario.theme, BaseModel)
+                    else seeded.scenario.theme
+                ),
             }
         )
 
@@ -440,9 +422,12 @@ class NeMoSimResourcesServer(SimpleResourcesServer):
         request: Request,
         body: NeMoSimVerifyRequest,
     ) -> NeMoSimProcessorResponse:
-        context = self._context(request)
-        if body.nemo_sim_context != context:
-            raise HTTPException(status_code=409, detail="Verified NeMo-Sim context does not match the seeded session")
+        seeded = self._seeded_episode(request)
+        if body.nemo_sim_context != seeded.nemo_sim_context or body.scenario != seeded.scenario:
+            raise HTTPException(
+                status_code=409,
+                detail="Verified NeMo-Sim resolved episode does not match the seeded session",
+            )
         scenario_completed = {"user", "assistant"} <= _conversation_roles(body.nemo_sim_result)
         return NeMoSimProcessorResponse(
             **body.model_dump(mode="json"),

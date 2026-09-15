@@ -9,10 +9,10 @@ from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
+from nemo_gym.config_types import AgentServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.processors.base import BaseProcessorConfig
 from nemo_gym.processors.multi_agent import (
+    BaseMultiTurnProcessorConfig,
     EpisodeEvent,
     MultiAgentEpisodeSpec,
     MultiAgentProcessor,
@@ -60,12 +60,11 @@ class UserAssistantVerifyResponse(BaseVerifyResponse):
     turns_completed: int
 
 
-class UserAssistantProcessorConfig(BaseProcessorConfig):
+class UserAssistantProcessorConfig(BaseMultiTurnProcessorConfig):
     """Configuration for the two-participant user-assistant specialization."""
 
     assistant_agent: AgentServerRef
     user_agent: AgentServerRef
-    resources_server: ResourcesServerRef
     max_turns: int = Field(8, ge=1)
     status_url_path: str = "/episode_status"
 

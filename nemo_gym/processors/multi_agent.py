@@ -10,6 +10,7 @@ The Processor records exact participant invocations and returns the final focal
 participant response through the standard ``BaseVerifyResponse`` contract.
 """
 
+from collections.abc import Mapping
 from typing import Any, Literal, Optional
 
 from fastapi import Body, Request
@@ -17,7 +18,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.agents.responses_api_agent import INTERNAL_TRAJECTORY_KEY
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.config_types import (
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+)
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -60,6 +67,14 @@ class EpisodeStatus(BaseModel):
     state: dict[str, Any] = Field(default_factory=dict)
 
 
+class ResponsesInvocationResult(BaseModel):
+    """Validated result of one Responses API actor invocation."""
+
+    response: NeMoGymResponse
+    agent_trajectory: Optional[dict[str, Any]] = None
+    response_cookies: dict[str, Any] = Field(default_factory=dict)
+
+
 class MultiAgentRunRequest(BaseRunRequest):
     """Per-task initial inputs for the focal participant and configured peers.
 
@@ -99,11 +114,97 @@ class MultiAgentVerifyResponse(BaseVerifyResponse):
     turns_completed: int
 
 
-class MultiAgentProcessorConfig(BaseProcessorConfig):
+class BaseMultiTurnProcessorConfig(BaseProcessorConfig):
+    """Configuration shared by Processors that orchestrate multi-turn episodes."""
+
+    resources_server: ResourcesServerRef
+
+
+class BaseMultiTurnProcessor(BaseProcessor):
+    """Transport and lifecycle substrate for multi-turn interaction protocols.
+
+    Subclasses own turn sequencing and their typed episode artifacts. This base
+    owns Resources Server seeding/verification, Responses API dispatch,
+    trajectory extraction, cookie propagation, and aggregate-metrics routing.
+    """
+
+    config: BaseMultiTurnProcessorConfig
+
+    @staticmethod
+    def _json_payload(payload: BaseModel | Mapping[str, Any]) -> dict[str, Any]:
+        if isinstance(payload, BaseModel):
+            return payload.model_dump(mode="json")
+        return dict(payload)
+
+    async def _seed_episode(
+        self,
+        *,
+        payload: BaseModel | Mapping[str, Any],
+        cookies: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/seed_session",
+            json=self._json_payload(payload),
+            cookies=dict(cookies),
+        )
+        await raise_for_status(response)
+        return await get_response_json(response), dict(response.cookies)
+
+    async def _invoke_responses_actor(
+        self,
+        *,
+        target: AgentServerRef | ModelServerRef,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        body: BaseRunRequest,
+        cookies: Mapping[str, Any],
+    ) -> ResponsesInvocationResult:
+        response = await self.server_client.post(
+            server_name=target.name,
+            url_path=self.url_path_for_run("/v1/responses", body),
+            json=params,
+            cookies=dict(cookies),
+        )
+        await raise_for_status(response)
+        response_json = await get_response_json(response)
+        agent_trajectory = response_json.pop(INTERNAL_TRAJECTORY_KEY, None)
+        return ResponsesInvocationResult(
+            response=NeMoGymResponse.model_validate(response_json),
+            agent_trajectory=agent_trajectory,
+            response_cookies=dict(response.cookies),
+        )
+
+    async def _verify_episode(
+        self,
+        *,
+        payload: BaseModel | Mapping[str, Any],
+        cookies: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json=self._json_payload(payload),
+            cookies=dict(cookies),
+        )
+        await raise_for_status(response)
+        return await get_response_json(response)
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        if self.config.skip_verification:
+            return await super().aggregate_metrics(body)
+        response = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/aggregate_metrics",
+            json=body,
+        )
+        await raise_for_status(response)
+        return AggregateMetrics.model_validate(await get_response_json(response))
+
+
+class MultiAgentProcessorConfig(BaseMultiTurnProcessorConfig):
     participants: dict[str, AgentServerRef] = Field(min_length=2)
     turn_order: list[str] = Field(min_length=2)
     focal_participant: str
-    resources_server: ResourcesServerRef
     max_turns: int = Field(8, ge=1)
     status_url_path: str = "/episode_status"
 
@@ -145,7 +246,7 @@ def _visible_text(response: NeMoGymResponse) -> str:
     return response.output_text.strip()
 
 
-class MultiAgentProcessor(BaseProcessor):
+class MultiAgentProcessor(BaseMultiTurnProcessor):
     """Run independently configured participants in a validated round-robin order."""
 
     config: MultiAgentProcessorConfig
@@ -199,16 +300,13 @@ class MultiAgentProcessor(BaseProcessor):
         cookies: Any,
     ) -> tuple[NeMoGymResponse, Optional[dict[str, Any]], dict[str, Any]]:
         spec = self._episode_spec()
-        response = await self.server_client.post(
-            server_name=spec.participants[participant].name,
-            url_path=self.url_path_for_run("/v1/responses", body),
-            json=params,
+        result = await self._invoke_responses_actor(
+            target=spec.participants[participant],
+            params=params,
+            body=body,
             cookies=cookies,
         )
-        await raise_for_status(response)
-        response_json = await get_response_json(response)
-        agent_trajectory = response_json.pop(INTERNAL_TRAJECTORY_KEY, None)
-        return NeMoGymResponse.model_validate(response_json), agent_trajectory, dict(response.cookies)
+        return result.response, result.agent_trajectory, result.response_cookies
 
     async def _episode_status(self, cookies: Any) -> tuple[EpisodeStatus, dict[str, Any]]:
         spec = self._episode_spec()
@@ -249,16 +347,13 @@ class MultiAgentProcessor(BaseProcessor):
     async def run(self, request: Request, body: MultiAgentRunRequest) -> MultiAgentVerifyResponse:
         spec = self._episode_spec()
         environment_cookies = dict(request.cookies)
-        seed_response = await self.server_client.post(
-            server_name=spec.resources_server.name,
-            url_path="/seed_session",
-            json=body.model_dump(mode="json"),
+        seed_result, seed_cookies = await self._seed_episode(
+            payload=body,
             cookies=environment_cookies,
         )
-        await raise_for_status(seed_response)
-        body = self._resolve_seeded_body(body, await get_response_json(seed_response))
+        body = self._resolve_seeded_body(body, seed_result)
         params_by_participant = self._params_by_participant(body)
-        environment_cookies = dict(seed_response.cookies)
+        environment_cookies = seed_cookies
         environment_cookie_names = set(environment_cookies)
         participant_cookies: dict[str, dict[str, Any]] = {participant: {} for participant in spec.participants}
         participant_inputs = {
@@ -388,23 +483,8 @@ class MultiAgentProcessor(BaseProcessor):
                 "verification_skipped": True,
             }
         else:
-            verify_response = await self.server_client.post(
-                server_name=spec.resources_server.name,
-                url_path="/verify",
-                json=verify_request.model_dump(mode="json"),
-                cookies=dict(environment_cookies),
+            result = await self._verify_episode(
+                payload=verify_request,
+                cookies=environment_cookies,
             )
-            await raise_for_status(verify_response)
-            result = await get_response_json(verify_response)
         return self._build_verify_response(result)
-
-    async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        if self.config.skip_verification:
-            return await super().aggregate_metrics(body)
-        response = await self.server_client.post(
-            server_name=self._episode_spec().resources_server.name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))

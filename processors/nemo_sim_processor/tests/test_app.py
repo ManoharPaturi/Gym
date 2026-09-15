@@ -10,6 +10,7 @@ import pytest
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.processors.multi_agent import BaseMultiTurnProcessor
 from nemo_gym.server_utils import ServerClient
 from processors.nemo_sim_processor.app import (
     NeMoSimProcessor,
@@ -80,10 +81,6 @@ def _scenario() -> dict:
         "theme": {"type": "recommendation", "description": "Plan dinner."},
         "goal": "Plan dinner.",
         "locale": "en_US",
-        "seed": 1042,
-        "personas_dataset_version": "0.0.2",
-        "personas_source_sha256": "a" * 64,
-        "personas_panel_seed": 42,
     }
 
 
@@ -94,11 +91,11 @@ def _context() -> dict:
         "personas_dataset_version": "0.0.2",
         "personas_source_sha256": "a" * 64,
         "personas_panel_seed": 42,
-        "probe_type": "general_open_ended",
-        "theme": {"topic": "recommendation", "goal": "Plan dinner."},
-        "goal": "Plan dinner.",
-        "persona": {"first_name": "Morgan", "age": 42},
     }
+
+
+def test_inherits_protocol_agnostic_multi_turn_base() -> None:
+    assert isinstance(_processor(), BaseMultiTurnProcessor)
 
 
 @pytest.mark.asyncio
@@ -157,7 +154,7 @@ async def test_conversation_loop_calls_participant_agents_and_support_models(mon
         "summary-model",
         "nemo-sim-resources",
     ]
-    assert posts[1]["json"]["max_output_tokens"] == 77
+    assert posts[1]["json"].max_output_tokens == 77
     assert posts[0]["json"] == {"nemo_sim_sampling": {"locale": "en_US", "seed": 1042, "probe_type": None}}
     assert posts[-1]["json"]["scenario"]["persona"]["first_name"] == "Morgan"
     assert posts[-1]["json"]["nemo_sim_context"] == _context()
@@ -260,6 +257,8 @@ async def test_preserves_failure_before_first_assistant_turn(monkeypatch: pytest
     result = await processor.run(SimpleNamespace(cookies={}), _request())
 
     assert result.nemo_sim_result.conversation_status is False
+    assert result.nemo_sim_result.conversation_messages == []
+    assert result.nemo_sim_result.simulation_outcome == {"status": "failed"}
     assert result.response.output == []
     assert result.invocations == []
 

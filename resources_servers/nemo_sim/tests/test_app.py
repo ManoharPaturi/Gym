@@ -149,8 +149,7 @@ def test_seed_session_resolves_replayable_scenario(tmp_path: Path) -> None:
     assert scenario["persona"]["first_name"] in {"Morgan", "Avery"}
     assert scenario["probe_type"] == "general_open_ended"
     assert scenario["goal"] == "Seek a practical recommendation about local food."
-    assert scenario["personas_dataset_version"] == "0.0.2"
-    assert len(scenario["personas_source_sha256"]) == 64
+    assert "personas_dataset_version" not in scenario
 
 
 def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> None:
@@ -159,8 +158,8 @@ def test_probe_mix_deterministically_selects_enabled_probe(tmp_path: Path) -> No
         response = client.post("/seed_session", json=_seed_body(seed=19))
 
     assert response.status_code == 200
-    assert response.json()["nemo_sim_context"]["probe_type"] == "general_educational"
-    assert response.json()["nemo_sim_context"]["theme"]["topic"] == "local ecology"
+    assert response.json()["scenario"]["probe_type"] == "general_educational"
+    assert response.json()["scenario"]["theme"]["type"] == "local ecology"
 
 
 def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
@@ -178,7 +177,7 @@ def test_sessions_keep_independent_resolved_contexts(tmp_path: Path) -> None:
         first_status = first.post("/episode_status", json={}).json()
         second_status = second.post("/episode_status", json={}).json()
 
-    assert first_context["probe_type"] != second_context["probe_type"]
+    assert first_context["seed"] != second_context["seed"]
     assert first_status["state"]["probe_type"] == "general_open_ended"
     assert second_status["state"]["probe_type"] == "general_educational"
 
@@ -244,7 +243,7 @@ def test_verify_rejects_context_from_another_seeded_episode(tmp_path: Path) -> N
         response = client.post("/verify", json=verify_body)
 
     assert response.status_code == 409
-    assert response.json()["detail"] == "Verified NeMo-Sim context does not match the seeded session"
+    assert response.json()["detail"] == "Verified NeMo-Sim resolved episode does not match the seeded session"
 
 
 def test_seed_session_rejects_non_sampling_task_fields(tmp_path: Path) -> None:
