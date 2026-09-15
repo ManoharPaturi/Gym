@@ -40,7 +40,7 @@ def _model_response(response_id: str, text: str) -> dict:
     }
 
 
-def _processor() -> NeMoSimProcessor:
+def _processor(*, simulation_config: dict | None = None) -> NeMoSimProcessor:
     config = NeMoSimProcessorConfig(
         host="127.0.0.1",
         port=12345,
@@ -53,6 +53,7 @@ def _processor() -> NeMoSimProcessor:
         api_response_model=ModelServerRef(type="responses_api_models", name="api-response-model"),
         resources_server=ResourcesServerRef(type="resources_servers", name="nemo-sim-resources"),
         max_turns=2,
+        simulation_config=simulation_config or {},
     )
     client = MagicMock(spec=ServerClient)
     client.global_config_dict = {"observability_enabled": False}
@@ -156,6 +157,25 @@ def test_rejects_unknown_response_parameter_alias() -> None:
                 "model_responses_create_params": {"not_a_nemo_sim_alias": {"input": []}},
             }
         )
+
+
+def test_simulation_config_is_processor_configuration_not_task_input() -> None:
+    processor = _processor(simulation_config={"max_steps": 4, "context_compression": False})
+
+    assert processor.config.simulation_config == {"max_steps": 4, "context_compression": False}
+    with pytest.raises(ValueError, match="must not be set in a dataset row"):
+        NeMoSimRunRequest.model_validate(
+            {
+                **_request().model_dump(mode="json"),
+                "simulation_config": {"max_steps": 7},
+            }
+        )
+
+
+@pytest.mark.parametrize("field", ["name", "locale", "max_turns"])
+def test_rejects_gym_managed_simulation_config_fields(field: str) -> None:
+    with pytest.raises(ValueError, match="controlled by NeMoSimProcessor"):
+        _processor(simulation_config={field: "override"})
 
 
 @pytest.mark.asyncio

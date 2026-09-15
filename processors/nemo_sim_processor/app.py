@@ -50,13 +50,21 @@ class NeMoSimScenario(BaseModel):
 
 
 class NeMoSimRunRequest(BaseRunRequest):
-    """Gym request plus the NeMo-Sim row and per-alias response parameters."""
+    """Gym task row plus per-alias response parameters."""
 
     model_config = ConfigDict(extra="allow")
 
     scenario: NeMoSimScenario | None = None
     model_responses_create_params: dict[str, NeMoGymResponseCreateParamsNonStreaming] = Field(default_factory=dict)
-    simulation_config: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_task_simulation_config(cls, values: Any) -> Any:
+        if isinstance(values, Mapping) and "simulation_config" in values:
+            raise ValueError(
+                "simulation_config is benchmark-wide Processor configuration and must not be set in a dataset row"
+            )
+        return values
 
     @model_validator(mode="after")
     def reject_unknown_model_aliases(self) -> "NeMoSimRunRequest":
@@ -117,7 +125,18 @@ class NeMoSimProcessorConfig(BaseProcessorConfig):
     resources_server: ResourcesServerRef
     max_turns: int = Field(5, ge=1)
     agent_call_timeout_s: float = Field(300.0, gt=0)
+    simulation_config: dict[str, Any] = Field(default_factory=dict)
     skip_verification: Literal[False] = False
+
+    @model_validator(mode="after")
+    def reject_gym_managed_simulation_config(self) -> "NeMoSimProcessorConfig":
+        managed_fields = {"locale", "max_turns", "name"} & self.simulation_config.keys()
+        if managed_fields:
+            raise ValueError(
+                "simulation_config fields controlled by NeMoSimProcessor must not be overridden: "
+                f"{sorted(managed_fields)}"
+            )
+        return self
 
     def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
         return {
@@ -318,7 +337,7 @@ class NeMoSimProcessor(BaseProcessor):
         set_debug_log_path(None)
         if body.scenario is None:
             raise RuntimeError("Resources Server did not resolve a NeMo-Sim scenario")
-        config_values = dict(body.simulation_config)
+        config_values = dict(self.config.simulation_config)
         config_values.update(
             {
                 "name": "conversation_messages",

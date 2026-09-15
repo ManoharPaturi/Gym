@@ -33,6 +33,11 @@ It also materializes `benchmarks/nemo_sim/data/nemo_sim.jsonl`, the lightweight
 Gym task dataset. At Resources Server startup, the source is validated and a
 bounded deterministic panel is created or reused beside it under `panels/`.
 
+NeMo-Sim protocol settings are benchmark-wide `NeMoSimProcessorConfig.simulation_config`
+values, not task-row fields. The Processor always controls `name` and `max_turns`,
+while `/seed_session` supplies each scenario's `locale`. Dataset rows contain only
+the per-task sampling inputs.
+
 After preparation:
 
 ```bash
